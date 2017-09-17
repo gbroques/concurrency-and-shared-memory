@@ -1,12 +1,8 @@
-CC=gcc
-CFLAGS=-I.
-OBJ=master.o
+CC = gcc
+CFLAGS = -g -Wall -I.
+EXECS = master palin
 
-%.o: %.c
-	$(CC) -c -o $@ $< $(CFLAGS)
-
-master: $(OBJ)
-	gcc -o $@ $^ $(CFLAGS)
+all: $(EXECS)
 
 clean:
-	rm -f *.o master
+	rm -f *.o $(EXECS)
