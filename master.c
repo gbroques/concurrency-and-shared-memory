@@ -21,12 +21,15 @@ static void fork_children(void);
 static int get_shared_segment_size(void);
 static int get_size_of_flags(void);
 static int get_size_of_turn(void);
-static int get_turn_index(void);
-static int get_flags_index(void);
+static void get_shared_memory_for_flags(void);
+static void get_shared_memory_for_turn(void);
+static void execute_child_code(int i);
 
 static const int MAX_STRINGS = 256;
 
-static int segment_id;
+static int list_segment_id;
+static int flags_segment_id;
+static int turn_segment_id;
 static char* shared_memory;
 
 int main(void) {
@@ -44,6 +47,10 @@ int main(void) {
 
   read_strings_into_shared_memory();
 
+  get_shared_memory_for_flags();
+
+  get_shared_memory_for_turn();
+
   fork_children();
 
   free_shared_memory();
@@ -60,23 +67,23 @@ static void read_strings_into_shared_memory(void) {
 
   /* Allocate a shared memory segment. */
   int shared_segment_size = get_shared_segment_size();
-  segment_id = shmget(IPC_PRIVATE, shared_segment_size,
+  list_segment_id = shmget(IPC_PRIVATE, shared_segment_size,
     IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
 
-  if (segment_id == -1) {
+  if (list_segment_id == -1) {
     perror("master shmget");
     exit(EXIT_FAILURE);
   }
-  printf("segment id = %d\n", segment_id);
+  printf("segment id = %d\n", list_segment_id);
   /* Attach the shared memory segment. */
-  shared_memory = (char*) shmat(segment_id, 0, 0);
+  shared_memory = (char*) shmat(list_segment_id, 0, 0);
   if (*shared_memory == -1) {
     perror("master shmat");
     exit(EXIT_FAILURE);
   }
   printf("shared memory attached at address %p\n", shared_memory);
   /* Determine the segment’s size. */
-  shmctl(segment_id, IPC_STAT, &shmbuffer);
+  shmctl(list_segment_id, IPC_STAT, &shmbuffer);
   segment_size = shmbuffer.shm_segsz;
   printf("segment size: %d\n", segment_size);
   /* Write a string to the shared memory segment. */
@@ -90,7 +97,6 @@ static void read_strings_into_shared_memory(void) {
       i += MEMORY_OFFSET;
     }
   } while (chars_read > -1);
-
 }
 
 /**
@@ -116,7 +122,6 @@ static int setup_interrupt(void) {
  * @return Zero on success. -1 on error.
  */
 static int setup_interval_timer(int time) {
-  /* set ITIMER_PROF for 60-second interval */
   struct itimerval value;
   value.it_interval.tv_sec = time;
   value.it_interval.tv_usec = 0;
@@ -130,47 +135,64 @@ static int setup_interval_timer(int time) {
 static void free_shared_memory(void) {
   printf("\nFreeing shared memory...\n");
   shmdt(shared_memory);
-  shmctl(segment_id, IPC_RMID, 0);
+  shmctl(list_segment_id, IPC_RMID, 0);
+
+  shmctl(flags_segment_id, IPC_RMID, 0);
+
+  shmctl(turn_segment_id, IPC_RMID, 0);
 }
 
 static void fork_children(void) {
+  int children_pids[MAX_PROCESSES];
   int pid, status;
-  int num_processes = 1;
-  pid = fork();
+  int num_processes;
+  int total_processes = 3;
+  for (num_processes = 1; num_processes < total_processes; num_processes++) {
+    children_pids[num_processes] = fork();
+    printf("num_processes: %d\n", num_processes);
 
-  if (pid == -1) {
-    perror("master fork");
-    exit(EXIT_FAILURE);
+
+    if (children_pids[num_processes] == -1) {
+      perror("master fork");
+      exit(EXIT_FAILURE);
+    }
+
+    if (children_pids[num_processes] == 0) { // Child
+      char process_id[12];
+      sprintf(process_id, "%d", num_processes - 1);
+      char index[12];
+      sprintf(index, "%d", num_processes * MAX_WRITES - MAX_WRITES);
+      char list_segment_id_string[12];
+      sprintf(list_segment_id_string, "%d", list_segment_id);
+      char flags_segment_id_string[12];
+      sprintf(flags_segment_id_string, "%d", flags_segment_id);
+      char turn_segment_id_string[12];
+      sprintf(turn_segment_id_string, "%d", turn_segment_id);
+      printf("Process ID: %d\n", num_processes - 1);
+      execlp(
+        "palin",
+        "palin",
+        process_id,
+        index,
+        list_segment_id_string,
+        flags_segment_id_string,
+        turn_segment_id_string,
+        (char*) NULL
+      );
+      perror("palin");
+      _exit(EXIT_FAILURE);
+      // execute_child_code(num_processes);
+    }
   }
 
-  if (pid == 0) { // Child
-    int flags_index = get_flags_index();
-    int turn_index = get_turn_index();
-    char process_id[12];
-    sprintf(process_id, "%d", num_processes);
-    char segment_id_string[12];
-    sprintf(segment_id_string, "%d", segment_id);
-    char flags_index_string[12];
-    sprintf(flags_index_string, "%d", flags_index);
-    char turn_index_string[12];
-    sprintf(turn_index_string, "%d", turn_index);
-
-    execlp(
-      "palin",
-      "palin",
-      process_id,
-      "0",
-      segment_id_string,
-      flags_index_string,
-      turn_index_string,
-      (char*) NULL
-    );
-    perror("palin");
-    _exit(EXIT_FAILURE);
+  int k;
+  for (k = 1; k < 3; k++) {
+    waitpid(children_pids[k], &status, 0);
+    printf("palin terminated with status: %d\n", status);
   }
 
-  wait(&status);
-  printf("palin terminated with status: %d\n", status);
+
+  printf("master terminated\n");
 }
 
 /**
@@ -179,9 +201,7 @@ static void fork_children(void) {
  * @return The size of the segment in shared memory
  */
 static int get_shared_segment_size(void) {
-  int size_of_flags = get_size_of_flags();
-  const int size_of_turn = get_size_of_turn();
-  return MEMORY_OFFSET * MAX_STRINGS + size_of_turn + size_of_flags;
+  return MEMORY_OFFSET * MAX_STRINGS;
 }
 
 /**
@@ -202,28 +222,40 @@ static int get_size_of_turn(void) {
   return sizeof(int);
 }
 
-/**
- * Returns the index to the turn in shared memory
- *
- * @return The index of the turn in shared memory
- */
-static int get_turn_index(void) {
-  int size_of_turn = get_size_of_turn();
-  int size_of_shared_memory_segment = get_shared_segment_size();
-  return size_of_shared_memory_segment - size_of_turn - 1;
+static void get_shared_memory_for_flags(void) {
+  int shared_segment_size = get_size_of_flags();
+  flags_segment_id = shmget(IPC_PRIVATE, shared_segment_size,
+    IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
 }
 
-/**
- * Returns the index to the flags in shared memory
- *
- * @return The index of the flags in shared memory
- */
-static int get_flags_index(void) {
-  int size_of_turn = get_size_of_turn();
-  int size_of_shared_memory_segment = get_shared_segment_size();
-  int size_of_flags = get_size_of_flags();
-  return (
-    size_of_shared_memory_segment - size_of_turn - size_of_flags - 1
-  );
+static void get_shared_memory_for_turn(void) {
+  int shared_segment_size = get_size_of_turn();
+  turn_segment_id = shmget(IPC_PRIVATE, shared_segment_size,
+    IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
 }
 
+static void execute_child_code(int i) {
+    // char process_id[12];
+    // sprintf(process_id, "%d", i);
+    // char index[12];
+    // sprintf(index, "%d", i * MAX_WRITES - MAX_WRITES);
+    // char list_segment_id_string[12];
+    // sprintf(list_segment_id_string, "%d", list_segment_id);
+    // char flags_segment_id_string[12];
+    // sprintf(flags_segment_id_string, "%d", flags_segment_id);
+    // char turn_segment_id_string[12];
+    // sprintf(turn_segment_id_string, "%d", turn_segment_id);
+
+    // execlp(
+    //   "palin",
+    //   "palin",
+    //   process_id - 1,
+    //   index,
+    //   list_segment_id_string,
+    //   flags_segment_id_string,
+    //   turn_segment_id_string,
+    //   (char*) NULL
+    // );
+    // perror("palin");
+    // _exit(EXIT_FAILURE);
+}
