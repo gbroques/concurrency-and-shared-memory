@@ -16,14 +16,16 @@ static int setup_interval_timer(int time);
 static int setup_interrupt(void);
 static void free_shared_memory(void);
 static void free_shared_memory_and_abort(int s);
-static void read_strings_into_shared_memory(void);
-static void fork_children(void);
+static int read_strings_into_shared_memory(void);
+static void fork_children(int strings_read);
 static int get_shared_segment_size(void);
 static int get_size_of_flags(void);
 static int get_size_of_turn(void);
 static void get_shared_memory_for_flags(void);
 static void get_shared_memory_for_turn(void);
-static void execute_child_code(int i);
+static void fork_and_exec_children(int i, pid_t* children_pids, int string_index);
+static void clear_output_files();
+static void exec_child_code(int process_number, int shared_memory_index);
 
 static const int MAX_STRINGS = 256;
 
@@ -38,20 +40,22 @@ int main(void) {
     return EXIT_FAILURE;
   }
 
-  if (setup_interval_timer(60) == -1) {
+  if (setup_interval_timer(60*6) == -1) {
     perror("Faled to set up the ITIMER_PROF interval timer");
     return EXIT_FAILURE;
   }
 
   signal(SIGINT, free_shared_memory_and_abort);
 
-  read_strings_into_shared_memory();
+  int strings_read = read_strings_into_shared_memory();
 
   get_shared_memory_for_flags();
 
   get_shared_memory_for_turn();
 
-  fork_children();
+  clear_output_files();
+
+  fork_children(strings_read);
 
   free_shared_memory();
 
@@ -60,12 +64,12 @@ int main(void) {
 
 /**
  * Reads strings from stdin into shared memory
+ *
+ * @return Number of strings read
  */
-static void read_strings_into_shared_memory(void) {
-  struct shmid_ds shmbuffer;
-  int segment_size;
+static int read_strings_into_shared_memory(void) {
+  int strings_read = 0;
 
-  /* Allocate a shared memory segment. */
   int shared_segment_size = get_shared_segment_size();
   list_segment_id = shmget(IPC_PRIVATE, shared_segment_size,
     IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
@@ -74,29 +78,23 @@ static void read_strings_into_shared_memory(void) {
     perror("master shmget");
     exit(EXIT_FAILURE);
   }
-  printf("segment id = %d\n", list_segment_id);
-  /* Attach the shared memory segment. */
+
   shared_memory = (char*) shmat(list_segment_id, 0, 0);
   if (*shared_memory == -1) {
     perror("master shmat");
     exit(EXIT_FAILURE);
   }
-  printf("shared memory attached at address %p\n", shared_memory);
-  /* Determine the segment’s size. */
-  shmctl(list_segment_id, IPC_STAT, &shmbuffer);
-  segment_size = shmbuffer.shm_segsz;
-  printf("segment size: %d\n", segment_size);
-  /* Write a string to the shared memory segment. */
-  printf("Reading input...\n");
+
   int i = 0;
   int chars_read;
   do { 
     chars_read = scanf("%s", &shared_memory[i]);
     if (chars_read > -1) {
-      printf("%5d: %12s\n", i, &shared_memory[i]);
+      strings_read++;
       i += MEMORY_OFFSET;
     }
-  } while (chars_read > -1);
+  } while (chars_read > -1 && strings_read < MAX_STRINGS);
+  return strings_read;
 }
 
 /**
@@ -133,66 +131,34 @@ static int setup_interval_timer(int time) {
  * Frees all allocated shared memory
  */
 static void free_shared_memory(void) {
-  printf("\nFreeing shared memory...\n");
   shmdt(shared_memory);
   shmctl(list_segment_id, IPC_RMID, 0);
-
   shmctl(flags_segment_id, IPC_RMID, 0);
-
   shmctl(turn_segment_id, IPC_RMID, 0);
 }
 
-static void fork_children(void) {
-  int children_pids[MAX_PROCESSES];
-  int pid, status;
+static void fork_children(int strings_read) {
+  pid_t children_pids[MAX_PROCESSES];
+  int statuses[MAX_PROCESSES];
   int num_processes;
-  int total_processes = 3;
-  for (num_processes = 1; num_processes < total_processes; num_processes++) {
-    children_pids[num_processes] = fork();
-    printf("num_processes: %d\n", num_processes);
-
-
-    if (children_pids[num_processes] == -1) {
-      perror("master fork");
-      exit(EXIT_FAILURE);
+  int strings_processed = 0;
+  int num_iters = 0;
+  do {
+    for (num_processes = 0; num_processes < MAX_PROCESSES; num_processes++) {
+      int string_index = (num_processes + (num_iters * MAX_PROCESSES)) * MAX_WRITES;
+      if (strings_processed < strings_read) {
+        fork_and_exec_children(num_processes, children_pids, string_index);
+        strings_processed += MAX_WRITES;
+      } else {
+        break;
+      }
     }
-
-    if (children_pids[num_processes] == 0) { // Child
-      char process_id[12];
-      sprintf(process_id, "%d", num_processes - 1);
-      char index[12];
-      sprintf(index, "%d", num_processes * MAX_WRITES - MAX_WRITES);
-      char list_segment_id_string[12];
-      sprintf(list_segment_id_string, "%d", list_segment_id);
-      char flags_segment_id_string[12];
-      sprintf(flags_segment_id_string, "%d", flags_segment_id);
-      char turn_segment_id_string[12];
-      sprintf(turn_segment_id_string, "%d", turn_segment_id);
-      printf("Process ID: %d\n", num_processes - 1);
-      execlp(
-        "palin",
-        "palin",
-        process_id,
-        index,
-        list_segment_id_string,
-        flags_segment_id_string,
-        turn_segment_id_string,
-        (char*) NULL
-      );
-      perror("palin");
-      _exit(EXIT_FAILURE);
-      // execute_child_code(num_processes);
+    int k;
+    for (k = 0; k < num_processes; k++) {
+      waitpid(children_pids[k], &statuses[k], 0);
     }
-  }
-
-  int k;
-  for (k = 1; k < 3; k++) {
-    waitpid(children_pids[k], &status, 0);
-    printf("palin terminated with status: %d\n", status);
-  }
-
-
-  printf("master terminated\n");
+    num_iters++;
+  } while (strings_processed < strings_read);
 }
 
 /**
@@ -234,28 +200,46 @@ static void get_shared_memory_for_turn(void) {
     IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
 }
 
-static void execute_child_code(int i) {
-    // char process_id[12];
-    // sprintf(process_id, "%d", i);
-    // char index[12];
-    // sprintf(index, "%d", i * MAX_WRITES - MAX_WRITES);
-    // char list_segment_id_string[12];
-    // sprintf(list_segment_id_string, "%d", list_segment_id);
-    // char flags_segment_id_string[12];
-    // sprintf(flags_segment_id_string, "%d", flags_segment_id);
-    // char turn_segment_id_string[12];
-    // sprintf(turn_segment_id_string, "%d", turn_segment_id);
+static void fork_and_exec_children(int process_number, pid_t* children_pids, int index) {
+  children_pids[process_number] = fork();
 
-    // execlp(
-    //   "palin",
-    //   "palin",
-    //   process_id - 1,
-    //   index,
-    //   list_segment_id_string,
-    //   flags_segment_id_string,
-    //   turn_segment_id_string,
-    //   (char*) NULL
-    // );
-    // perror("palin");
-    // _exit(EXIT_FAILURE);
+  if (children_pids[process_number] == -1) {
+    perror("master fork");
+    exit(EXIT_FAILURE);
+  }
+
+  if (children_pids[process_number] == 0) { // Child
+    exec_child_code(process_number, index);
+  }
+}
+
+static void clear_output_files() {
+  fclose(fopen("palin.out", "w"));
+  fclose(fopen("nopalin.out", "w"));
+}
+
+static void exec_child_code(int process_number, int shared_memory_index) {
+    char process_number_string[12];
+    sprintf(process_number_string, "%d", process_number);
+    char string_index[12];
+    sprintf(string_index, "%d", shared_memory_index);
+    char list_segment_id_string[12];
+    sprintf(list_segment_id_string, "%d", list_segment_id);
+    char flags_segment_id_string[12];
+    sprintf(flags_segment_id_string, "%d", flags_segment_id);
+    char turn_segment_id_string[12];
+    sprintf(turn_segment_id_string, "%d", turn_segment_id);
+
+    execlp(
+      "palin",
+      "palin",
+      process_number_string,
+      string_index,
+      list_segment_id_string,
+      flags_segment_id_string,
+      turn_segment_id_string,
+      (char*) NULL
+    );
+    perror("palin");
+    _exit(EXIT_FAILURE);
 }

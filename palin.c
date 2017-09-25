@@ -13,9 +13,9 @@
 #include "master.h"
 
 static int is_palindrome(char str[]);
-void process(const int i, char* str);
-void critical_section(const int i, char* str);
-void remainder_section(void);
+void process(const int i, int index);
+void critical_section(const int i, int index);
+void get_timestamp(char* timestamp, int buffer_size);
 
 char* shared_memory;
 process_state* flags;
@@ -34,23 +34,9 @@ int main(int argc, char* argv[]) {
   const int flags_segment_id = atoi(argv[4]);
   const int turn_segment_id = atoi(argv[5]);
 
-  printf("Process %d assigned index %d\n", id, index);
-
   shared_memory = (char*) shmat(list_segment_id, 0, 0);
   flags = (process_state*) shmat(flags_segment_id, NULL, 0);
   turn = (int*) shmat(turn_segment_id, NULL, 0);
-
-  // int turn = shared_memory[turn_index];
-  // process_state flags = shared_memory[flags_index];
-  // printf("\nflags %d\n", flags);
-  // int j;
-  // int max_flags_index = flags_index + MAX_PROCESSES * sizeof(process_state);
-  // int size_of_process_state = sizeof(process_state);
-  // for (j = flags_index; j < max_flags_index; j += size_of_process_state) {
-  //   printf("Process #%d state = %d\n", (j - flags_index) / size_of_process_state, shared_memory[j]);
-  // }
-  // printf("\nTURN = %d\n", turn);
-  // exit(EXIT_SUCCESS);
 
   if (*shared_memory < 0 || *flags < 0 || * turn < 0) {
     fprintf(stderr, "PID: %d\n", getpid());
@@ -58,13 +44,18 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Process 1: Index = 5 1280 - 2304
   int i;
   int start_index = index * MEMORY_OFFSET;
   int memory_offset_max = MAX_WRITES * MEMORY_OFFSET + start_index;
   for (i = start_index; i < memory_offset_max; i += MEMORY_OFFSET) {
     char* str = &shared_memory[i];
-    process(id, str);
+    if (strlen(str) == 0) {
+      shmdt(shared_memory);
+      shmdt(flags);
+      shmdt(turn);
+      return 0;
+    }
+    process(id, i);
   }
 
   shmdt(shared_memory);
@@ -88,72 +79,81 @@ static int is_palindrome(char str[]) {
     return 1;
 }
 
-// enum state {
-//   idle,
-//   want_in,
-//   in_cs
-// };
-// extern int turn;
-// extern state flag[n]; /*Flag corresponding to each process in shared memory */
+void process(const int i, int index) {
+  int buffer_size = 80;
+  char timestamp[buffer_size];
+  int n = MAX_PROCESSES;
+  int j;
+  do {
+    flags[i] = want_in; // Raise my flag
+    j = *turn; // Set local variable
+    // Wait until its my turn
+    while (j != i)
+      j = (flags[j] != idle) ? *turn : (j + 1) % n;
 
-void process(const int i, char* str) {
-  // do {
-    int n = MAX_PROCESSES;
-    int j;
-    do {
-      flags[i] = want_in; // Raise my flag
-      printf("Process %d: Raising my flag\n", i);
-      j = *turn; // Set local variable
-      // wait until its my turn
-      printf("Process %d: Waiting until its my turn...\n", i);
-      while (j != i)
-        j = (flags[j] != idle) ? *turn : (j + 1) % n;
+    get_timestamp(timestamp, buffer_size);
+    fprintf(stderr, "[%s] PID %2d: Declaring intention to enter critical section\n", timestamp, i);
 
-      printf("Process %d: My turn! Declaring my intention to enter critical section\n", i);
+    // Declare intention to enter critical section
+    flags[i] = in_cs;
 
-      // Declare intention to enter critical section
-      flags[i] = in_cs;
-      // Check that no one else is in critical section
-      printf("Process %d: Making sure no one else is in their critical section...\n", i);
-      for (j = 0; j < n; j++)
-        if ((j != i) && (flags[j] == in_cs))
-          break;
-    } while ((j < n) || (*turn != i && flags[*turn] != idle));
-    // Assign turn to self and enter critical section
-    *turn = i;
-    critical_section(i, str);
-    // Exit section
-    printf("Process %d: Exiting critical section\n", i);
-    j = (*turn + 1) % n;
-    while (flags[j] == idle)
-      j = (j + 1) % n;
+    // Check that no one else is in critical section
+    for (j = 0; j < n; j++)
+      if ((j != i) && (flags[j] == in_cs))
+        break;
+  } while ((j < n) || (*turn != i && flags[*turn] != idle));
+  // Assign turn to self and enter critical section
+  *turn = i;
+  critical_section(i, index);
+  // Exit section
+  j = (*turn + 1) % n;
+  while (flags[j] == idle)
+    j = (j + 1) % n;
 
-    printf("Process %d: Assigning turn to process %d\n", i, j);
+  get_timestamp(timestamp, buffer_size);
+  fprintf(stderr, "[%s] PID %2d: Exiting critical section\n", timestamp, i);
 
-    // Assign turn to next waiting process; change own flag to idle
-    *turn = j;
-    flags[i] = idle;
-    remainder_section();
-  // } while (1);
+  // Assign turn to next waiting process; change own flag to idle
+  *turn = j;
+  flags[i] = idle;
 }
 
-void critical_section(const int i, char* str) {
-  printf("Process %d: Inside critical section\n", i); 
+void critical_section(const int process_number, int index) {
+  int buffer_size = 80;
+  char timestamp[buffer_size];
+  get_timestamp(timestamp, buffer_size);
+  fprintf(stderr, "[%s] PID %2d: Entering critical section\n", timestamp, process_number);
+  char* str = &shared_memory[index];
   // Sleep between 0 and 2 seconds
   sleep(rand() % 3);
 
-  // char* string = &shared_memory[i];
-  printf("\nProcess %d: String: %10s\n", i, str);
-
+  FILE *fp;
+  char output[256];
+  int file_index = index / MEMORY_OFFSET + 1;
+  get_timestamp(timestamp, buffer_size);
   if (is_palindrome(str)) {
-    printf("Process %d: %s is a palindrome\n", i, str);
+    fp = fopen("palin.out", "a+");
+    fprintf(stderr, "\n[%s] PID %2d: %3d %15s PALINDROME\n\n", timestamp, process_number, file_index, str);
+    sprintf(output, "%5d %3d %20s\n", getpid(), file_index, str);
+    fputs(output, fp);
   } else {
-    printf("Process %d: %s is not a palindrome\n", i, str);
+    fp = fopen("nopalin.out", "a+");
+    fprintf(stderr, "\n[%s] PID %2d: %3d %15s NOT PALINDROME\n\n", timestamp, process_number, file_index, str);
+    sprintf(output, "%5d %3d %20s\n", getpid(), file_index, str);
+    fputs(output, fp);
   }
+
+  fclose(fp);
 
   // Sleep between 0 and 2 second
   sleep(rand() % 3);
 }
-void remainder_section(void) {
-  
+
+void get_timestamp(char* timestamp, int buffer_size) {
+  time_t raw_time;
+  struct tm* time_info;
+
+  time(&raw_time);
+  time_info = localtime(&raw_time);
+  strftime(timestamp, buffer_size, "%I:%M:%S %p", time_info); 
 }
