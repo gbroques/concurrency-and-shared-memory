@@ -34,13 +34,15 @@ static int flags_segment_id;
 static int turn_segment_id;
 static char* shared_memory;
 
-int main(void) {
+int main(int argc, char* argv[]) {
+  int timer_duration = argc == 2 ? atoi(argv[1]) : 60;
+
   if (setup_interrupt() == -1) {
     perror("Failed to set up handler for SIGPROF");
     return EXIT_FAILURE;
   }
 
-  if (setup_interval_timer(60*6) == -1) {
+  if (setup_interval_timer(timer_duration) == -1) {
     perror("Faled to set up the ITIMER_PROF interval timer");
     return EXIT_FAILURE;
   }
