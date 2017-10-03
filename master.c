@@ -23,7 +23,7 @@ static int get_size_of_flags(void);
 static int get_size_of_turn(void);
 static void get_shared_memory_for_flags(void);
 static void get_shared_memory_for_turn(void);
-static void fork_and_exec_children(int i, pid_t* children_pids, int string_index);
+static void fork_and_exec_child(int i, pid_t* children_pids, int string_index);
 static void clear_output_files();
 static void exec_child_code(int process_number, int shared_memory_index);
 
@@ -35,6 +35,24 @@ static int turn_segment_id;
 static char* shared_memory;
 
 int main(int argc, char* argv[]) {
+  int help_flag = 0;
+  opterr = 0;
+  int c;
+  while ((c = getopt(argc, argv, "h")) != -1) {
+    switch (c) {
+      case 'h':
+        help_flag = 1;
+        break;
+      default:
+        abort();
+    }
+  }
+
+  if (help_flag) {
+    printf("Usage: %s < strings\n", argv[0]);
+    exit(EXIT_SUCCESS);
+  }
+
   int timer_duration = argc == 2 ? atoi(argv[1]) : 60;
 
   if (setup_interrupt() == -1) {
@@ -107,6 +125,10 @@ static void free_shared_memory_and_abort(int s) {
   abort();
 }
 
+
+/**
+ * Sets up the interrupt handler
+ */
 static int setup_interrupt(void) {
   struct sigaction act;
   act.sa_handler = free_shared_memory_and_abort;
@@ -139,6 +161,12 @@ static void free_shared_memory(void) {
   shmctl(turn_segment_id, IPC_RMID, 0);
 }
 
+/**
+ * Forks multiple children processes,
+ * to process the strings in shared memory.
+ *
+ * @param strings_read The number of strings read into shared memory.
+ */
 static void fork_children(int strings_read) {
   pid_t children_pids[MAX_PROCESSES];
   int statuses[MAX_PROCESSES];
@@ -149,7 +177,7 @@ static void fork_children(int strings_read) {
     for (num_processes = 0; num_processes < MAX_PROCESSES; num_processes++) {
       int string_index = (num_processes + (num_iters * MAX_PROCESSES)) * MAX_WRITES;
       if (strings_processed < strings_read) {
-        fork_and_exec_children(num_processes, children_pids, string_index);
+        fork_and_exec_child(num_processes, children_pids, string_index);
         strings_processed += MAX_WRITES;
       } else {
         break;
@@ -190,19 +218,34 @@ static int get_size_of_turn(void) {
   return sizeof(int);
 }
 
+/**
+ * Allocates the shared memory needed for the flags
+ * in the Peterson's algorithm.
+ */
 static void get_shared_memory_for_flags(void) {
   int shared_segment_size = get_size_of_flags();
   flags_segment_id = shmget(IPC_PRIVATE, shared_segment_size,
     IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
 }
 
+/**
+ * Allocated the shared memory needed for the turn
+ * variable in the Peterson's algorithm.
+ */
 static void get_shared_memory_for_turn(void) {
   int shared_segment_size = get_size_of_turn();
   turn_segment_id = shmget(IPC_PRIVATE, shared_segment_size,
     IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
 }
 
-static void fork_and_exec_children(int process_number, pid_t* children_pids, int index) {
+/**
+ * Forks and execs a child to process a string in shared memory.
+ *
+ * @param process_number The process number of the child.
+ * @param children_pids An array to store the PID of the child.
+ * @param string_index The index of the string in shared memory.
+ */
+static void fork_and_exec_child(int process_number, pid_t* children_pids, int string_index) {
   children_pids[process_number] = fork();
 
   if (children_pids[process_number] == -1) {
@@ -211,15 +254,26 @@ static void fork_and_exec_children(int process_number, pid_t* children_pids, int
   }
 
   if (children_pids[process_number] == 0) { // Child
-    exec_child_code(process_number, index);
+    exec_child_code(process_number, string_index);
   }
 }
 
+/**
+ * Clears any text in the output files:
+ *   - palin.out
+ *   - nopain.out
+ */
 static void clear_output_files() {
   fclose(fopen("palin.out", "w"));
   fclose(fopen("nopalin.out", "w"));
 }
 
+/**
+ * Executes the child's code
+ *
+ * @param process_number The child's process number
+ * @param shared_memory_index The index of the string in shared memory.
+ */
 static void exec_child_code(int process_number, int shared_memory_index) {
     char process_number_string[12];
     sprintf(process_number_string, "%d", process_number);
