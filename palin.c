@@ -65,6 +65,13 @@ int main(int argc, char* argv[]) {
   return EXIT_SUCCESS;
 }
 
+/**
+ * Determines wheter a string is a palindrome.
+ *
+ * @param str The string to be tested.
+ *
+ * @return 1 if palindrome. 0 if not palindrome.
+ */
 static int is_palindrome(char str[]) {
     // Start from leftmost and rightmost corners of str
     int l = 0;
